@@ -1,0 +1,12 @@
+cbtca:
+  operational_planning_weights:
+    - [0.2, 0.8]
+    - [0.4, 0.6]
+    - [0.5, 0.5]
+    - [0.6, 0.4]
+    - [0.8, 0.2]
+  congestion_proxy_tiers: [tier1_direct, tier2_decomposed, tier3_congestion_plus_loss]
+  export_rules: [A, B, C]
+  planning_windows: [full_year, summer_only, targeted_constraints, project_specific]
+  target_set_sizes: [10, 20, 40]
+  outlier_caps: [99.0, 99.5, none]

@@ -1,0 +1,77 @@
+datasets:
+  - name: official_cp_reference
+    source: ERCOT public
+    endpoint_or_path: ERCOT public 4CP calculations and load documents
+    confirmation_status: Confirmed
+    granularity: monthly_or_annual_reference
+    years: [2023, 2024, 2025]
+    fields: [year, month, peak_date, peak_interval, peak_mw, citation]
+    coverage_gaps: [monthly_12cp_may_need_internal_computation]
+    approximation_strategy: compute_monthly_cp_from_system_load_if_needed
+    validation_checks: [match_official_4cp_where_available]
+
+  - name: system_load_series
+    source: ERCOT public_or_Yes_Energy
+    endpoint_or_path: provider_timeseries_endpoint_or_public_ingestion
+    confirmation_status: Likely
+    granularity: interval_preferred_hourly_fallback
+    years: [2023, 2024, 2025]
+    fields: [timestamp, system_load_mw, source, granularity]
+    coverage_gaps: [interval_precision_may_vary]
+    approximation_strategy: hourly_fallback_with_flag
+    validation_checks: [continuity, duplicates, nulls, range]
+
+  - name: zonal_load_series
+    source: Yes_Energy_or_Enverus
+    endpoint_or_path: vendor_zonal_load_endpoint_if_available_else_proxy
+    confirmation_status: Unknown
+    granularity: interval_preferred_hourly_acceptable
+    years: [2023, 2024, 2025]
+    fields: [timestamp, zone, load_mw, source, quality_flag]
+    coverage_gaps: [direct_zonal_interval_load_may_be_missing]
+    approximation_strategy: static_or_dynamic_zonal_share_model
+    validation_checks: [zonal_vs_system_plausibility, negative_check]
+
+  - name: lmp_and_congestion_series
+    source: Yes_Energy
+    endpoint_or_path: vendor_lmp_or_congestion_endpoint
+    confirmation_status: Likely
+    granularity: five_minute_or_hourly
+    years: [2023, 2024, 2025]
+    fields: [timestamp, zone_or_node, lmp, congestion_component, loss_component, energy_component, system_lambda]
+    coverage_gaps: [direct_congestion_or_lambda_may_be_missing]
+    approximation_strategy: proxy_hierarchy_tier1_tier2_tier3
+    validation_checks: [decomposition_if_possible, nulls, outliers]
+
+  - name: constraint_shadow_price_series
+    source: Yes_Energy
+    endpoint_or_path: vendor_constraint_shadow_price_endpoint
+    confirmation_status: Likely
+    granularity: interval
+    years: [2023, 2024, 2025]
+    fields: [timestamp, constraint_name, shadow_price, binding_flag, flow, limit, area]
+    coverage_gaps: [ptdfs_likely_unavailable]
+    approximation_strategy: constraint_score_and_exposure_proxy
+    validation_checks: [sign_sanity, uniqueness, frequency_profile]
+
+  - name: generation_asset_metadata
+    source: Enverus
+    endpoint_or_path: asset_or_fleet_metadata_path
+    confirmation_status: Likely
+    granularity: static_or_periodic
+    years: [2023, 2024, 2025]
+    fields: [asset_name, zone, fuel_type, capacity_mw, status, in_service_date, location]
+    coverage_gaps: [btm_visibility_limited]
+    approximation_strategy: context_and_planning_support_only
+    validation_checks: [dedupe, normalization, zone_coverage]
+
+  - name: annual_tcos_target
+    source: ERCOT_public
+    endpoint_or_path: filing_or_allocator_context_ingestion
+    confirmation_status: Confirmed
+    granularity: annual
+    years: [2023, 2024, 2025]
+    fields: [year, tcos_target_usd, citation, approximation_flag]
+    coverage_gaps: [exact_total_may_require_assembly]
+    approximation_strategy: cited_estimate_if_needed
+    validation_checks: [citation_cross_check]
