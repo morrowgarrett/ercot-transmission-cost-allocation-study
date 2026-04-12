@@ -1,3 +1,3 @@
 # Data Layer
 
-This package will hold loaders, transforms, manifest parsing, caching, synthetic fixtures, and quality checks.
+This package holds loaders, transforms, manifest parsing, caching, preprocessing, synthetic fixtures, and quality checks.
