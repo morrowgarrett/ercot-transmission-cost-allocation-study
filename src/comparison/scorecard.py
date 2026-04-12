@@ -50,10 +50,13 @@ def _apply_peak_map(inputs: MethodologyInputs, peak_map: Dict[str, str]) -> Meth
     return clone
 
 
+def _default_sensitivity_matrix_path() -> str:
+    return str(Path(__file__).resolve().parents[1] / "config" / "sensitivity_matrix.yaml")
+
+
 def run_methodology_suite(
     inputs: MethodologyInputs,
     model_specs: Sequence[tuple[str, object, Dict]] | None = None,
-    sensitivity_params: Iterable[Dict] | None = None,
 ) -> List[MethodologyResult]:
     model_specs = model_specs or DEFAULT_MODEL_SPECS
     summer_peaks, annual_peaks = _derive_peak_maps(inputs)
@@ -68,19 +71,14 @@ def run_methodology_suite(
         result.methodology = methodology_name
         result.assumptions.setdefault("tcos_target_usd", inputs.tcos_target_usd)
         results.append(result)
-
-    if sensitivity_params:
-        for scenario in sensitivity_params:
-            result = CBTCAModel().run(inputs, params=scenario)
-            label = scenario.get("label", "unnamed")
-            result.methodology = f"cbtca_sensitivity::{label}"
-            result.assumptions.setdefault("tcos_target_usd", inputs.tcos_target_usd)
-            result.assumptions["sensitivity_label"] = label
-            results.append(result)
     return results
 
 
-def build_scorecard(results: Sequence[MethodologyResult], baseline_methodology: str = "4cp") -> pd.DataFrame:
+def build_scorecard(
+    results: Sequence[MethodologyResult],
+    baseline_methodology: str = "4cp",
+    cbtca_sensitivity_results: List[MethodologyResult] | None = None,
+) -> pd.DataFrame:
     revenue = revenue_sufficiency_check(results)
     concentration = concentration_metrics(results)
     gaming = gaming_exposure_metrics(results)
@@ -97,6 +95,35 @@ def build_scorecard(results: Sequence[MethodologyResult], baseline_methodology: 
     scorecard = revenue.merge(concentration, on=["methodology", "year"], how="left")
     scorecard = scorecard.merge(gaming, on=["methodology", "year"], how="left")
     scorecard = scorecard.merge(avg_shift, on="methodology", how="left")
+    scorecard["status"] = "complete"
+
+    if cbtca_sensitivity_results is not None:
+        baseline_cbtca = next(result for result in results if result.methodology == "cbtca")
+        sensitivity_row = summarize_sensitivity_family(cbtca_sensitivity_results, baseline_cbtca)
+        sensitivity_metrics = gaming_exposure_metrics(
+            [MethodologyResult(methodology="cbtca_sensitivities", year=baseline_cbtca.year, shares={}, allocations_usd={})]
+        ).iloc[0].to_dict()
+        sensitivity_row.update(
+            {
+                "year": baseline_cbtca.year,
+                "allocated_total_usd": sum(baseline_cbtca.allocations_usd.values()),
+                "allocated_tcos_usd": sum(baseline_cbtca.allocations_usd.values()),
+                "target_total_usd": baseline_cbtca.assumptions.get("tcos_target_usd", sum(baseline_cbtca.allocations_usd.values())),
+                "target_tcos_usd": baseline_cbtca.assumptions.get("tcos_target_usd", sum(baseline_cbtca.allocations_usd.values())),
+                "difference_usd": 0.0,
+                "gap_usd": 0.0,
+                "within_tolerance": True,
+                "revenue_sufficient": True,
+                "hhi": scorecard.loc[scorecard["methodology"] == "cbtca", "hhi"].iloc[0],
+                "max_zone_share": scorecard.loc[scorecard["methodology"] == "cbtca", "max_zone_share"].iloc[0],
+                "zone_count": scorecard.loc[scorecard["methodology"] == "cbtca", "zone_count"].iloc[0],
+                "mean_absolute_share_shift_vs_4cp": None,
+                "status": "scenario_family",
+                **{k: v for k, v in sensitivity_metrics.items() if k not in {"methodology", "year"}},
+            }
+        )
+        scorecard = pd.concat([scorecard, pd.DataFrame([sensitivity_row])], ignore_index=True, sort=False)
+
     return scorecard.sort_values(["year", "methodology"]).reset_index(drop=True)
 
 
@@ -105,34 +132,9 @@ def build_scorecard_table(
     cbtca_sensitivity_results: List[MethodologyResult],
     target_tcos_usd: float,
 ) -> pd.DataFrame:
-    scorecard = build_scorecard(results)
-    baseline_cbtca = next(result for result in results if result.methodology == "cbtca")
-    sensitivity_row = summarize_sensitivity_family(cbtca_sensitivity_results, baseline_cbtca)
-    sensitivity_row.update(
-        {
-            "year": baseline_cbtca.year,
-            "status": "scenario_family",
-            "allocated_total_usd": sum(baseline_cbtca.allocations_usd.values()),
-            "allocated_tcos_usd": sum(baseline_cbtca.allocations_usd.values()),
-            "target_total_usd": target_tcos_usd,
-            "target_tcos_usd": target_tcos_usd,
-            "difference_usd": 0.0,
-            "gap_usd": 0.0,
-            "within_tolerance": True,
-            "revenue_sufficient": True,
-            "hhi": scorecard.loc[scorecard["methodology"] == "cbtca", "hhi"].iloc[0],
-            "max_zone_share": scorecard.loc[scorecard["methodology"] == "cbtca", "max_zone_share"].iloc[0],
-            "zone_count": scorecard.loc[scorecard["methodology"] == "cbtca", "zone_count"].iloc[0],
-            "gaming_exposure_score": scorecard.loc[scorecard["methodology"] == "cbtca", "gaming_exposure_score"].iloc[0],
-            "peak_dependence_score": scorecard.loc[scorecard["methodology"] == "cbtca", "peak_dependence_score"].iloc[0],
-            "annualization_score": scorecard.loc[scorecard["methodology"] == "cbtca", "annualization_score"].iloc[0],
-            "gaming_exposure_label": "higher is worse",
-            "mean_absolute_share_shift_vs_4cp": None,
-        }
-    )
-    scorecard = scorecard.copy()
-    scorecard["status"] = "complete"
-    return pd.concat([scorecard, pd.DataFrame([sensitivity_row])], ignore_index=True, sort=False)
+    scorecard = build_scorecard(results, cbtca_sensitivity_results=cbtca_sensitivity_results)
+    scorecard.loc[scorecard["methodology"] == "cbtca_sensitivities", ["target_total_usd", "target_tcos_usd"]] = target_tcos_usd
+    return scorecard
 
 
 def build_comparison_bundle(
@@ -140,12 +142,26 @@ def build_comparison_bundle(
     sensitivity_params: Iterable[Dict] | None = None,
     baseline_methodology: str = "4cp",
 ) -> Dict[str, pd.DataFrame | List[MethodologyResult]]:
-    results = run_methodology_suite(inputs, sensitivity_params=sensitivity_params)
+    results = run_methodology_suite(inputs)
+    if sensitivity_params is not None:
+        cbtca_sensitivity_results = []
+        for scenario in sensitivity_params:
+            result = CBTCAModel().run(inputs, params=scenario)
+            label = scenario.get("label", "unnamed")
+            result.methodology = f"cbtca_sensitivity_{label}"
+            result.assumptions["sensitivity_family"] = "ad_hoc"
+            result.assumptions["sensitivity_label"] = label
+            cbtca_sensitivity_results.append(result)
+    else:
+        matrix = load_sensitivity_matrix(_default_sensitivity_matrix_path())
+        cbtca_sensitivity_results = build_sensitivity_cases(inputs, matrix=matrix)
+
     return {
         "results": results,
+        "cbtca_sensitivity_results": cbtca_sensitivity_results,
         "allocation_shares": allocation_shares_by_zone(results),
         "burden_shift": burden_shift_vs_baseline(results, baseline_methodology=baseline_methodology),
-        "scorecard": build_scorecard(results, baseline_methodology=baseline_methodology),
+        "scorecard": build_scorecard(results, baseline_methodology=baseline_methodology, cbtca_sensitivity_results=cbtca_sensitivity_results),
     }
 
 
@@ -169,7 +185,7 @@ def run_comparison_bundle(
         result.assumptions.setdefault("tcos_target_usd", inputs.tcos_target_usd)
         results.append(result)
 
-    matrix_path = sensitivity_matrix_path or str(Path(__file__).resolve().parents[1] / "config" / "sensitivity_matrix.yaml")
+    matrix_path = sensitivity_matrix_path or _default_sensitivity_matrix_path()
     matrix = load_sensitivity_matrix(matrix_path)
     cbtca_sensitivity_results = build_sensitivity_cases(inputs, params=model_params.get("cbtca", {}), matrix=matrix)
     return {

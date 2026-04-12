@@ -4,6 +4,7 @@ from src.comparison.metrics import (
     allocation_shares_by_zone,
     burden_shift_vs_baseline,
     concentration_metrics,
+    gaming_exposure_metrics,
     revenue_sufficiency_check,
 )
 from src.comparison.scorecard import build_comparison_bundle, build_scorecard, run_methodology_suite
@@ -85,6 +86,12 @@ def test_run_methodology_suite_returns_all_core_models():
     assert names == {"4cp", "4cp_net_load", "12cp", "12cp_net_load", "hybrid_vol_12cp_nl", "cbtca"}
 
 
+def test_build_comparison_bundle_scorecard_contains_all_seven_methodologies():
+    bundle = build_comparison_bundle(_comparison_inputs())
+    names = set(bundle["scorecard"]["methodology"])
+    assert names == {"4cp", "4cp_net_load", "12cp", "12cp_net_load", "hybrid_vol_12cp_nl", "cbtca", "cbtca_sensitivities"}
+
+
 def test_metric_tables_have_expected_columns():
     results = run_methodology_suite(_comparison_inputs())
     shares = allocation_shares_by_zone(results)
@@ -98,15 +105,38 @@ def test_metric_tables_have_expected_columns():
     assert {"methodology", "hhi", "max_zone_share"}.issubset(concentration.columns)
 
 
-def test_scorecard_and_bundle_include_sensitivity_case():
+def test_scorecard_and_bundle_include_sensitivity_family_row():
     bundle = build_comparison_bundle(
         _comparison_inputs(),
         sensitivity_params=[{"label": "weights_50_50", "operational_weight": 0.5, "planning_weight": 0.5}],
     )
     scorecard = bundle["scorecard"]
-    assert "cbtca_sensitivity::weights_50_50" in set(scorecard["methodology"])
+    assert "cbtca_sensitivities" in set(scorecard["methodology"])
+    assert scorecard.loc[scorecard["methodology"] == "cbtca_sensitivities", "status"].iloc[0] == "scenario_family"
     assert not bundle["allocation_shares"].empty
     assert not bundle["burden_shift"].empty
+
+
+def test_burden_shift_vs_4cp_is_calculated_correctly_for_known_case():
+    results = run_methodology_suite(_comparison_inputs())
+    shifts = burden_shift_vs_baseline(results)
+    row = shifts[(shifts["methodology"] == "cbtca") & (shifts["zone"] == "NORTH")].iloc[0]
+    baseline = next(result for result in results if result.methodology == "4cp")
+    cbtca = next(result for result in results if result.methodology == "cbtca")
+    assert row["baseline_share"] == pytest.approx(baseline.shares["NORTH"])
+    assert row["candidate_share"] == pytest.approx(cbtca.shares["NORTH"])
+    assert row["share_shift"] == pytest.approx(cbtca.shares["NORTH"] - baseline.shares["NORTH"])
+
+
+def test_gaming_exposure_metrics_include_cbtca_sensitivity_family_scores():
+    bundle = build_comparison_bundle(_comparison_inputs())
+    metrics = gaming_exposure_metrics(
+        [type("R", (), {"methodology": "cbtca_sensitivities", "year": 2024})()]
+    )
+    row = metrics.iloc[0]
+    assert row["gaming_exposure_score"] == pytest.approx(0.30)
+    assert row["peak_dependence_score"] == pytest.approx(0.25)
+    assert row["annualization_score"] == pytest.approx(0.75)
 
 
 def test_scorecard_retains_baseline_rows():
