@@ -62,13 +62,17 @@ def _build_lambda_map(rows: Iterable[Dict[str, Any]]) -> Dict[str, float]:
     return out
 
 
+def _validate_load_basis_name(basis: str) -> None:
+    if basis not in {"gross", "net"}:
+        raise ValueError(f"unsupported load basis: {basis}")
+
+
 def _select_load_basis(inputs: MethodologyInputs, basis: str) -> List[Dict[str, Any]]:
+    _validate_load_basis_name(basis)
     if basis == "gross":
         rows = inputs.zonal_load
-    elif basis == "net":
-        rows = inputs.net_zonal_load
     else:
-        raise ValueError(f"unsupported load basis: {basis}")
+        rows = inputs.net_zonal_load
     if not rows:
         raise ValueError(f"{basis} zonal load rows are required for CBTCA load basis")
     return rows
@@ -389,6 +393,8 @@ class CBTCAModel(MethodologyModel):
         proxy_tier = params.get("congestion_proxy_tier", "auto")
         operational_load_basis = params.get("operational_load_basis", "gross")
         planning_load_basis = params.get("planning_load_basis", "gross")
+        _validate_load_basis_name(operational_load_basis)
+        _validate_load_basis_name(planning_load_basis)
         planning_window = params.get("planning_reference_window", params.get("planning_window", "full_year"))
         target_set_size = int(params.get("planning_target_set_size", params.get("target_set_size", 20)))
         outlier_cap_pctile = params.get("outlier_percentile", params.get("outlier_cap_pctile", 99.5))

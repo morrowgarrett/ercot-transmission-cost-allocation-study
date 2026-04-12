@@ -94,6 +94,76 @@ def _seasonal_inputs(include_direct_congestion=True, include_decomposed=True):
     )
 
 
+def _equal_load_inputs():
+    inputs = _seasonal_inputs(include_direct_congestion=True, include_decomposed=True)
+    for row in inputs.zonal_load:
+        row["load_mw"] = 100.0
+    for row in inputs.net_zonal_load:
+        row["load_mw"] = 100.0
+    for row in inputs.congestion_series:
+        row["congestion_component"] = 10.0
+    for row in inputs.zonal_lmp_series:
+        row["lmp"] = 35.0
+        row["energy_component"] = 20.0
+        row["loss_component"] = 5.0
+    return inputs
+
+
+def _regression_inputs():
+    peak_intervals = _yearly_peaks()
+    zonal_load = []
+    net_zonal_load = []
+    congestion_series = []
+    zonal_lmp_series = []
+    system_lambda_series = []
+    shadow_price_series = []
+    for m in range(1, 13):
+        ts = peak_intervals[f"2024-{m:02d}"]
+        zonal_load.extend(
+            [
+                {"timestamp": ts, "zone": "NORTH", "load_mw": 120.0},
+                {"timestamp": ts, "zone": "SOUTH", "load_mw": 80.0},
+            ]
+        )
+        net_zonal_load.extend(
+            [
+                {"timestamp": ts, "zone": "NORTH", "load_mw": 120.0},
+                {"timestamp": ts, "zone": "SOUTH", "load_mw": 80.0},
+            ]
+        )
+        congestion_series.extend(
+            [
+                {"timestamp": ts, "zone": "NORTH", "congestion_component": 10.0},
+                {"timestamp": ts, "zone": "SOUTH", "congestion_component": 5.0},
+            ]
+        )
+        zonal_lmp_series.extend(
+            [
+                {"timestamp": ts, "zone": "NORTH", "lmp": 30.0, "energy_component": 15.0, "loss_component": 5.0},
+                {"timestamp": ts, "zone": "SOUTH", "lmp": 25.0, "energy_component": 15.0, "loss_component": 5.0},
+            ]
+        )
+        system_lambda_series.append({"timestamp": ts, "system_lambda": 15.0})
+        shadow_price_series.extend(
+            [
+                {"timestamp": ts, "constraint": "C1", "shadow_price": 10.0, "binding_flag": 1},
+                {"timestamp": ts, "constraint": "C2", "shadow_price": 5.0, "binding_flag": 1},
+            ]
+        )
+    return MethodologyInputs(
+        year=2024,
+        tcos_target_usd=1200.0,
+        peak_intervals=peak_intervals,
+        zonal_load=zonal_load,
+        net_zonal_load=net_zonal_load,
+        zonal_lmp_series=zonal_lmp_series,
+        system_lambda_series=system_lambda_series,
+        congestion_series=congestion_series,
+        shadow_price_series=shadow_price_series,
+        metadata={"export_rule": "A"},
+    )
+
+
 def test_cbtca_direct_proxy_happy_path():
     model = CBTCAModel()
     inputs = _seasonal_inputs(include_direct_congestion=True)
@@ -153,6 +223,48 @@ def test_cbtca_preserves_signed_congestion_proxy_values():
     result = model.run(inputs)
     assert any("signed congestion burden was preserved" in warning for warning in result.warnings)
     assert result.shares["NORTH"] > result.shares["SOUTH"]
+
+
+def test_cbtca_rejects_zero_congestion_signal():
+    model = CBTCAModel()
+    inputs = _seasonal_inputs(include_direct_congestion=True, include_decomposed=True)
+    for row in inputs.congestion_series:
+        row["congestion_component"] = 0.0
+    for row in inputs.zonal_lmp_series:
+        row["lmp"] = 20.0
+        row["energy_component"] = 20.0
+        row["loss_component"] = 0.0
+    with pytest.raises(ValueError, match="planning burden"):
+        model.run(inputs)
+
+
+def test_cbtca_equal_loads_and_equal_proxies_produce_equal_shares():
+    model = CBTCAModel()
+    inputs = _equal_load_inputs()
+    result = model.run(inputs)
+    assert result.shares["NORTH"] == pytest.approx(0.5)
+    assert result.shares["SOUTH"] == pytest.approx(0.5)
+
+
+def test_cbtca_rejects_invalid_proxy_tier_name():
+    model = CBTCAModel()
+    with pytest.raises(ValueError, match="unsupported congestion proxy tier"):
+        model.run(_seasonal_inputs(), params={"congestion_proxy_tier": "bogus"})
+
+
+def test_cbtca_rejects_invalid_load_basis_name():
+    model = CBTCAModel()
+    with pytest.raises(ValueError, match="unsupported load basis"):
+        model.run(_seasonal_inputs(), params={"operational_load_basis": "weird"})
+
+
+def test_cbtca_regression_pins_known_allocation_shares():
+    model = CBTCAModel()
+    result = model.run(_regression_inputs())
+    assert result.shares["NORTH"] == pytest.approx(0.75)
+    assert result.shares["SOUTH"] == pytest.approx(0.25)
+    assert result.allocations_usd["NORTH"] == pytest.approx(900.0)
+    assert result.allocations_usd["SOUTH"] == pytest.approx(300.0)
 
 
 def test_cbtca_sensitivity_model_normalizes_weights():
