@@ -5,6 +5,7 @@ __pycache__/
 .env.*
 .DS_Store
 .ipynb_checkpoints/
+*.egg-info/
 
 # Licensed/private data
 raw_data/
