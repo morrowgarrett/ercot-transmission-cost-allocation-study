@@ -84,13 +84,30 @@ def _aggregate_zone_values(rows: Iterable[Dict[str, Any]], value_key: str) -> Di
     return dict(totals)
 
 
+def _normalize_proxy_tier_name(tier: str | None) -> str | None:
+    aliases = {
+        None: None,
+        "auto": "auto",
+        "direct": "tier1_direct",
+        "tier1_direct": "tier1_direct",
+        "decomposed": "tier2_decomposed",
+        "tier2_decomposed": "tier2_decomposed",
+        "congestion_plus_loss": "tier3_congestion_plus_loss",
+        "tier3_congestion_plus_loss": "tier3_congestion_plus_loss",
+    }
+    if tier not in aliases:
+        raise ValueError(f"unsupported congestion proxy tier: {tier}")
+    return aliases[tier]
+
+
 def _prepare_operational_proxy(
     inputs: MethodologyInputs,
     tier: str | None = None,
 ) -> Tuple[Dict[Tuple[str, str], float], str | None, List[str]]:
     warnings: List[str] = []
+    tier = _normalize_proxy_tier_name(tier)
 
-    if tier in (None, "auto", "direct") and inputs.congestion_series:
+    if tier in (None, "auto", "tier1_direct") and inputs.congestion_series:
         proxy = {}
         for row in inputs.congestion_series:
             zone = row.get("zone")
@@ -104,9 +121,9 @@ def _prepare_operational_proxy(
                 value = row.get("value")
             proxy[(str(zone), str(timestamp))] = _safe_float(value)
         if proxy:
-            return proxy, "direct", warnings
+            return proxy, "tier1_direct", warnings
 
-    if tier in (None, "auto", "decomposed") and inputs.zonal_lmp_series:
+    if tier in (None, "auto", "tier2_decomposed") and inputs.zonal_lmp_series:
         proxy = {}
         available = False
         for row in inputs.zonal_lmp_series:
@@ -122,11 +139,11 @@ def _prepare_operational_proxy(
             available = True
             proxy[(str(zone), str(timestamp))] = _safe_float(lmp) - _safe_float(energy) - _safe_float(loss)
         if available:
-            return proxy, "decomposed", warnings
-        if tier == "decomposed":
+            return proxy, "tier2_decomposed", warnings
+        if tier == "tier2_decomposed":
             warnings.append("requested decomposed congestion proxy tier, but energy/loss components were unavailable")
 
-    if tier in (None, "auto", "congestion_plus_loss") and inputs.zonal_lmp_series and inputs.system_lambda_series:
+    if tier in (None, "auto", "tier3_congestion_plus_loss") and inputs.zonal_lmp_series and inputs.system_lambda_series:
         lambda_map = _build_lambda_map(inputs.system_lambda_series)
         proxy = {}
         for row in inputs.zonal_lmp_series:
@@ -140,12 +157,12 @@ def _prepare_operational_proxy(
             proxy[(str(zone), str(timestamp))] = _safe_float(lmp) - lambda_map[str(timestamp)]
         if proxy:
             warnings.append("operational congestion proxy fell back to lmp_minus_system_lambda; this is congestion-plus-loss, not pure congestion")
-            return proxy, "congestion_plus_loss", warnings
+            return proxy, "tier3_congestion_plus_loss", warnings
 
     return {}, None, warnings
 
 
-def _apply_positive_proxy_and_cap(
+def _apply_proxy_cap(
     proxy_map: Dict[Tuple[str, str], float],
     outlier_cap_pctile: float | None,
 ) -> Tuple[Dict[Tuple[str, str], float], int, bool]:
@@ -153,22 +170,22 @@ def _apply_positive_proxy_and_cap(
         return {}, 0, False
 
     had_negative = any(value < 0 for value in proxy_map.values())
-    positive_map = {key: max(0.0, value) for key, value in proxy_map.items()}
+    capped_map = dict(proxy_map)
 
     if outlier_cap_pctile is None:
-        return positive_map, 0, had_negative
+        return capped_map, 0, had_negative
 
-    nonzero_values = sorted(value for value in positive_map.values() if value > 0)
-    if not nonzero_values:
-        return positive_map, 0, had_negative
+    nonzero_abs_values = sorted(abs(value) for value in capped_map.values() if value != 0)
+    if not nonzero_abs_values:
+        return capped_map, 0, had_negative
 
-    cap = _percentile(nonzero_values, outlier_cap_pctile)
+    cap = _percentile(nonzero_abs_values, outlier_cap_pctile)
     capped = 0
-    for key, value in list(positive_map.items()):
-        if value > cap:
-            positive_map[key] = cap
+    for key, value in list(capped_map.items()):
+        if abs(value) > cap:
+            capped_map[key] = cap if value > 0 else -cap
             capped += 1
-    return positive_map, capped, had_negative
+    return capped_map, capped, had_negative
 
 
 def _compute_operational_share(
@@ -183,11 +200,11 @@ def _compute_operational_share(
     if not proxy_map:
         return {}, {"resolved_proxy_tier": None, "planning_only_fallback": True}, warnings
 
-    proxy_map, capped_values, had_negative = _apply_positive_proxy_and_cap(proxy_map, outlier_cap_pctile)
+    proxy_map, capped_values, had_negative = _apply_proxy_cap(proxy_map, outlier_cap_pctile)
     if capped_values:
-        warnings.append(f"capped {capped_values} operational proxy observations at the {outlier_cap_pctile}th percentile")
+        warnings.append(f"capped {capped_values} operational proxy observations at the {outlier_cap_pctile}th percentile by absolute magnitude")
     if had_negative:
-        warnings.append("negative proxy values were floored at zero for burden allocation")
+        warnings.append("operational proxy contains negative values; signed congestion burden was preserved per methodology spec")
 
     try:
         load_rows = _select_load_basis(inputs, load_basis)
@@ -206,7 +223,7 @@ def _compute_operational_share(
         if key not in proxy_map:
             continue
         matched += 1
-        burden[str(zone)] += max(0.0, _safe_float(row.get("load_mw"))) * proxy_map[key]
+        burden[str(zone)] += _safe_float(row.get("load_mw")) * proxy_map[key]
 
     total = sum(burden.values())
     if matched == 0 or total <= 0:
@@ -284,9 +301,9 @@ def _compute_planning_share(
     if not proxy_map:
         raise ValueError("CBTCA planning ledger requires a congestion proxy via direct congestion, decomposed LMP, or zonal LMP plus system lambda")
 
-    proxy_map, _, had_negative = _apply_positive_proxy_and_cap(proxy_map, None)
+    proxy_map, _, had_negative = _apply_proxy_cap(proxy_map, None)
     if had_negative:
-        warnings.append("negative planning exposure proxies were floored at zero")
+        warnings.append("planning exposure uses signed congestion proxy values per methodology spec")
 
     scores, timestamps_by_constraint, score_warnings = _extract_constraint_scores(inputs, planning_window, inputs.year)
     warnings.extend(score_warnings)
@@ -300,7 +317,7 @@ def _compute_planning_share(
         timestamp = row.get("timestamp")
         if zone is None or timestamp is None:
             continue
-        load_map[(str(zone), str(timestamp))] += max(0.0, _safe_float(row.get("load_mw")))
+        load_map[(str(zone), str(timestamp))] += _safe_float(row.get("load_mw"))
 
     planning_burden = defaultdict(float)
     for constraint, score in selected:
@@ -353,9 +370,9 @@ def _combine_shares(
 def _confidence_label(mode: str, proxy_tier: str | None, used_shadow_prices: bool) -> str:
     if mode == "planning_only_fallback":
         return "Low"
-    if proxy_tier == "direct" and used_shadow_prices:
+    if proxy_tier == "tier1_direct" and used_shadow_prices:
         return "High"
-    if proxy_tier in {"direct", "decomposed"}:
+    if proxy_tier in {"tier1_direct", "tier2_decomposed"}:
         return "Moderate"
     return "Low"
 
@@ -372,9 +389,9 @@ class CBTCAModel(MethodologyModel):
         proxy_tier = params.get("congestion_proxy_tier", "auto")
         operational_load_basis = params.get("operational_load_basis", "gross")
         planning_load_basis = params.get("planning_load_basis", "gross")
-        planning_window = params.get("planning_window", "full_year")
-        target_set_size = int(params.get("target_set_size", 20))
-        outlier_cap_pctile = params.get("outlier_cap_pctile", 99.5)
+        planning_window = params.get("planning_reference_window", params.get("planning_window", "full_year"))
+        target_set_size = int(params.get("planning_target_set_size", params.get("target_set_size", 20)))
+        outlier_cap_pctile = params.get("outlier_percentile", params.get("outlier_cap_pctile", 99.5))
         if outlier_cap_pctile == "none":
             outlier_cap_pctile = None
         elif outlier_cap_pctile is not None:
@@ -423,7 +440,7 @@ class CBTCAModel(MethodologyModel):
             "selected_constraints": planning_meta.get("selected_constraints", []),
             "confidence": confidence,
             "export_rule": inputs.metadata.get("export_rule", "unspecified"),
-            "method_note": "CBTCA v1 shared-engine implementation uses positive congestion-burden proxies and normalized operational/planning ledgers.",
+            "method_note": "CBTCA v1 shared-engine implementation preserves signed congestion proxies, uses normalized operational/planning ledgers, and explicitly labels fallback modes.",
         }
 
         return MethodologyResult(
@@ -452,13 +469,61 @@ def build_sensitivity_cases(inputs: MethodologyInputs, params: Dict[str, Any] | 
     model = CBTCAModel()
     results: List[MethodologyResult] = []
 
-    for op_weight, pl_weight in cbtca_matrix.get("operational_planning_weights", []):
+    def _run_case(label: str, family: str, overrides: Dict[str, Any]) -> None:
         scenario_params = deepcopy(params)
-        scenario_params["operational_weight"] = op_weight
-        scenario_params["planning_weight"] = pl_weight
+        scenario_params.update(overrides)
         result = model.run(inputs, params=scenario_params)
-        result.methodology = f"cbtca_sensitivity_{int(op_weight * 100)}_{int(pl_weight * 100)}"
-        result.assumptions["sensitivity_family"] = "operational_planning_weights"
+        result.methodology = f"cbtca_sensitivity_{label}"
+        result.assumptions["sensitivity_family"] = family
+        result.assumptions["sensitivity_label"] = label
         results.append(result)
+
+    for op_weight, pl_weight in cbtca_matrix.get("operational_planning_weights", []):
+        _run_case(
+            label=f"weights_{int(op_weight * 100)}_{int(pl_weight * 100)}",
+            family="operational_planning_weights",
+            overrides={"operational_weight": op_weight, "planning_weight": pl_weight},
+        )
+
+    for tier in cbtca_matrix.get("congestion_proxy_tiers", []):
+        _run_case(
+            label=tier,
+            family="congestion_proxy_tiers",
+            overrides={"congestion_proxy_tier": tier},
+        )
+
+    for rule in cbtca_matrix.get("export_rules", []):
+        _run_case(
+            label=f"export_rule_{rule.lower()}",
+            family="export_rules",
+            overrides={
+                "operational_load_basis": "net",
+                "planning_load_basis": "net",
+                "export_rule": rule,
+            },
+        )
+
+    for window in cbtca_matrix.get("planning_windows", []):
+        if window not in {"full_year", "summer_only"}:
+            continue
+        _run_case(
+            label=f"planning_window_{window}",
+            family="planning_windows",
+            overrides={"planning_reference_window": window},
+        )
+
+    for size in cbtca_matrix.get("target_set_sizes", []):
+        _run_case(
+            label=f"target_set_{size}",
+            family="target_set_sizes",
+            overrides={"planning_target_set_size": int(size)},
+        )
+
+    for cap in cbtca_matrix.get("outlier_caps", []):
+        _run_case(
+            label=f"outlier_cap_{str(cap).replace('.', '_')}",
+            family="outlier_caps",
+            overrides={"outlier_percentile": cap},
+        )
 
     return results

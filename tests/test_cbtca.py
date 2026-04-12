@@ -1,6 +1,6 @@
 import pytest
 
-from src.models import CBTCAModel, CBTCASensitivityModel, MethodologyInputs
+from src.models import CBTCAModel, CBTCASensitivityModel, MethodologyInputs, build_sensitivity_cases, load_sensitivity_matrix
 
 
 def _yearly_peaks():
@@ -99,7 +99,7 @@ def test_cbtca_direct_proxy_happy_path():
     assert sum(result.shares.values()) == pytest.approx(1.0)
     assert sum(result.allocations_usd.values()) == pytest.approx(1200.0)
     assert result.assumptions["mode"] == "combined"
-    assert result.assumptions["resolved_operational_proxy_tier"] == "direct"
+    assert result.assumptions["resolved_operational_proxy_tier"] == "tier1_direct"
     assert result.shares["NORTH"] > result.shares["SOUTH"]
 
 
@@ -107,7 +107,7 @@ def test_cbtca_prefers_decomposed_proxy_before_lambda_fallback():
     model = CBTCAModel()
     inputs = _seasonal_inputs(include_direct_congestion=False, include_decomposed=True)
     result = model.run(inputs)
-    assert result.assumptions["resolved_operational_proxy_tier"] == "decomposed"
+    assert result.assumptions["resolved_operational_proxy_tier"] == "tier2_decomposed"
     assert result.assumptions["confidence"] == "Moderate"
 
 
@@ -115,7 +115,7 @@ def test_cbtca_falls_back_to_congestion_plus_loss_when_needed():
     model = CBTCAModel()
     inputs = _seasonal_inputs(include_direct_congestion=False, include_decomposed=False)
     result = model.run(inputs)
-    assert result.assumptions["resolved_operational_proxy_tier"] == "congestion_plus_loss"
+    assert result.assumptions["resolved_operational_proxy_tier"] == "tier3_congestion_plus_loss"
     assert result.assumptions["confidence"] == "Low"
     assert any("congestion-plus-loss" in warning or "congestion-plus-loss" in str(result.warnings) for warning in result.warnings)
 
@@ -141,9 +141,29 @@ def test_cbtca_requires_planning_signal():
         model.run(inputs)
 
 
+def test_cbtca_preserves_signed_congestion_proxy_values():
+    model = CBTCAModel()
+    inputs = _seasonal_inputs(include_direct_congestion=True)
+    for row in inputs.congestion_series:
+        if row["zone"] == "SOUTH":
+            row["congestion_component"] = -abs(row["congestion_component"])
+    result = model.run(inputs)
+    assert any("signed congestion burden was preserved" in warning for warning in result.warnings)
+    assert result.shares["NORTH"] > result.shares["SOUTH"]
+
+
 def test_cbtca_sensitivity_model_normalizes_weights():
     model = CBTCASensitivityModel()
     inputs = _seasonal_inputs()
     result = model.run(inputs, params={"operational_weight": 2.0, "planning_weight": 3.0})
     assert result.assumptions["operational_weight"] == pytest.approx(0.4)
     assert result.assumptions["planning_weight"] == pytest.approx(0.6)
+
+
+def test_build_sensitivity_cases_covers_multiple_specified_families():
+    inputs = _seasonal_inputs()
+    matrix = load_sensitivity_matrix("/home/garrett/.openclaw/workspace/projects/ercot-transmission-cost-allocation-study/src/config/sensitivity_matrix.yaml")
+    results = build_sensitivity_cases(inputs, matrix=matrix)
+    families = {result.assumptions["sensitivity_family"] for result in results}
+    assert {"operational_planning_weights", "congestion_proxy_tiers", "export_rules", "planning_windows", "target_set_sizes", "outlier_caps"}.issubset(families)
+    assert len(results) == 19
