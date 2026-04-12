@@ -10,47 +10,59 @@ Legacy code reviewed in `projects/cbtca/src/models/`:
 
 ## What the legacy CBTCA code computes
 
-### Operational ledger
+### Operational ledger (`src/models/operational_ledger.py`)
 - Primary result object: `OperationalLedgerResult`
-- Supports two effective paths:
-  - shadow-price direct approximation (`prepare_shadow_price_data`)
-  - LMP decomposition fallback (`prepare_lmp_data`)
+- Two execution paths inside `run(...)`:
+  - **Primary path:** `prepare_shadow_price_data(...)` when `dam_shadow_prices` is supplied
+  - **Fallback path:** `prepare_lmp_data(...)` when only zonal DA LMP plus system lambda are available
+- Shared downstream steps after data preparation:
+  - `calculate_hourly_charges(...)`
+  - `apply_outlier_cap(...)`
+  - `aggregate(...)`
 - Core outputs:
-  - hourly charges
-  - monthly summary
-  - annual summary
-  - zone allocations and ratios
-  - capped-hours count
-  - methodology notes
-- Inputs required today:
-  - DA LMP and system lambda for fallback path
-  - optional direct congestion data
-  - optional DAM/SCED shadow prices
-  - optional system load and zone shift-factor approximations
+  - hourly zone charges
+  - monthly and annual summaries
+  - `zone_allocations_usd` and `zone_ratios`
+  - `total_congestion_usd`
+  - `capped_hours`
+  - narrative `methodology_notes`
+- Inputs accepted today by the legacy `run(...)` function:
+  - `da_lmp`, `system_lambda`, `zone_loads`, `da_congestion`, `system_load`
+  - `dam_shadow_prices`, `sced_shadow_prices`, `zone_shift_factors`
+  - `annual_tcos`, `year`
+- Important integration note: the code does not require all congestion artifacts at once. It supports a progressive fidelity ladder, with shadow prices preferred and LMP decomposition retained as a fallback.
 
-### Planning ledger
+### Planning ledger (`src/models/planning_ledger.py`)
 - Primary result object: `PlanningLedgerResult`
-- Identifies target constraints using keyword filters and/or planning/facility metadata
-- Computes zone sensitivities from LMP minus system lambda during a reference window
-- Allocates annual planning TCOS using sensitivity × load-share weighting
-- Inputs required today:
-  - DA LMP
-  - system lambda
-  - optional facilities and constraint summary data
+- `run(...)` performs three steps:
+  1. `identify_target_constraints(...)`
+  2. `calculate_zone_sensitivities(...)`
+  3. `allocate_planning_tcos(...)`
+- Computes zone sensitivities from `DA LMP - system lambda` over a configured reference window, then weights those sensitivities by zone load share
+- Inputs accepted today:
+  - required: `da_lmp`, `system_lambda`
+  - optional: `facilities`, `constraint_summary`
+  - scalar controls: `year`, `annual_tcos`
+- Important integration note: facilities and constraint summary data influence constraint identification and narrative context, but allocation can still run without them.
 
-### Combined allocator
+### Combined allocator (`src/models/combined_allocator.py`)
 - Primary result object: `CombinedAllocationResult`
-- Blends operational and planning zone ratios using configurable weights
-- Supports weight sweeps and comparison dataframe generation
+- Combines `OperationalLedgerResult` and `PlanningLedgerResult` by applying configurable operational/planning weights
+- Also exposes:
+  - `sweep_weights(...)` for sensitivity runs
+  - `to_comparison_dataframe(...)` for 4CP vs CBTCA comparisons
+- Important integration note: this layer only needs normalized zonal ratios from the two ledger submodels, which makes it a good adapter boundary for the shared engine.
 
-### Legacy 4CP model
+### Legacy 4CP model (`src/models/four_cp.py`)
 - Richer than the shared baseline scaffold
-- Supports ERCOT-native, official, and API-derived paths
-- Produces CP interval detail objects and zone allocations
+- Supports ERCOT-official, derived native-load, and API-sourced workflows
+- Produces interval-level objects (`CPInterval`, `FourCPResult`) and can attach TDSP detail
+- Important integration note: useful as a validation reference, but Phase 4 does not need to import this richer implementation into the shared baseline engine.
 
-### TDSP allocator
-- Project-specific overlay that maps TDSPs to zones and applies hard-coded CBTCA zone ratios
-- Useful as a downstream reporting layer, not as core shared-engine logic
+### TDSP allocator (`src/models/tdsp_allocator.py`)
+- Reporting overlay that maps TDSPs to zones and applies static CBTCA zone ratios from `comparison_shift.parquet`
+- Useful for downstream presentation and distributional analysis
+- Not appropriate as core methodology logic in the shared engine because it depends on post-allocation zone ratios rather than producing them
 
 ## Mapping to shared engine
 
@@ -65,17 +77,21 @@ Legacy code reviewed in `projects/cbtca/src/models/`:
 
 ### Inputs missing for CBTCA integration
 The shared interface does not yet have explicit fields for:
+- DA zonal LMP series
 - system lambda series
-- zonal/node LMP series with decomposition
-- shadow price / binding constraint records
+- direct congestion component series (optional operational fallback validation path)
+- DAM/SCED shadow price records
+- zone shift-factor mappings
 - facilities metadata
 - planning constraint summaries
 
 ### Recommended extension path
 Add optional structured congestion/planning inputs rather than overloading `metadata`:
-- `congestion_series`
+- `zonal_lmp_series`
 - `system_lambda_series`
+- `congestion_series`
 - `shadow_price_series`
+- `zone_shift_factors`
 - `planning_facilities`
 - `planning_constraint_summary`
 

@@ -167,6 +167,30 @@ def test_hybrid_happy_path():
     assert result.shares["SOUTH"] == pytest.approx(0.4 * 0.2 + 0.6 * 0.6)
 
 
+def test_hybrid_warns_when_volumetric_rows_do_not_cover_annual_energy_basis():
+    model = HybridVol12CPNLModel()
+    peaks = yearly_peaks()
+    inputs = MethodologyInputs(
+        year=2024,
+        tcos_target_usd=100.0,
+        peak_intervals=peaks,
+        zonal_load=[
+            {"timestamp": "2024-01-15T17:00:00Z", "zone": "NORTH", "load_mw": 80.0},
+            {"timestamp": "2024-01-15T17:00:00Z", "zone": "SOUTH", "load_mw": 20.0},
+        ],
+        net_zonal_load=[
+            {"timestamp": f"2024-{m:02d}-15T17:00:00Z", "zone": "NORTH", "load_mw": 40.0}
+            for m in range(1, 13)
+        ]
+        + [
+            {"timestamp": f"2024-{m:02d}-15T17:00:00Z", "zone": "SOUTH", "load_mw": 60.0}
+            for m in range(1, 13)
+        ],
+    )
+    result = model.run(inputs, params={"alpha": 0.4})
+    assert any("annual-energy floor" in warning for warning in result.warnings)
+
+
 def test_four_cp_requires_peak_intervals():
     model = FourCPModel()
     inputs = MethodologyInputs(year=2024, tcos_target_usd=100.0, zonal_load=[])

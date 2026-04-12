@@ -42,10 +42,14 @@ class HybridVol12CPNLModel(MethodologyModel):
         allocations = {zone: share * inputs.tcos_target_usd for zone, share in shares.items()}
 
         warnings = list(peak_result.warnings)
-        expected_rows = len(inputs.peak_intervals) * max(1, len(all_zones))
+        observed_zones = {row.get("zone") for row in inputs.zonal_load if row.get("zone") is not None}
+        zone_count = max(len(observed_zones), len(all_zones), 1)
+        expected_rows = 12 * zone_count
         if len(inputs.zonal_load) < expected_rows:
             warnings.append(
-                f"volumetric component received only {len(inputs.zonal_load)} zonal_load rows; annual energy basis may be incomplete"
+                "volumetric component received "
+                f"{len(inputs.zonal_load)} zonal_load rows, below the expected annual-energy floor of "
+                f"{expected_rows} rows for {zone_count} zones (12 monthly observations per zone); annual energy basis may be incomplete"
             )
         return MethodologyResult(
             methodology=self.name,
