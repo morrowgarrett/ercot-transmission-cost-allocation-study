@@ -437,14 +437,7 @@ class CBTCAModel(MethodologyModel):
 
 
 class CBTCASensitivityModel(CBTCAModel):
-    name = "cbtca_sensitivity"
-
-
-class CBTCASensitivityModel(CBTCAModel):
     name = "cbtca_sensitivities"
-
-    def run(self, inputs: MethodologyInputs, params: Dict[str, Any] | None = None) -> MethodologyResult:
-        return super().run(inputs, params=params)
 
 
 def load_sensitivity_matrix(path: str) -> Dict[str, Any]:
