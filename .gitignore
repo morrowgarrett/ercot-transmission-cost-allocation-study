@@ -6,6 +6,7 @@ __pycache__/
 .DS_Store
 .ipynb_checkpoints/
 *.egg-info/
+uv.lock
 
 # Licensed/private data
 raw_data/
