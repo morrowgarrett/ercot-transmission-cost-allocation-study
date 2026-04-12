@@ -1,6 +1,9 @@
+import os
 import pytest
 
 from src.models import CBTCAModel, CBTCASensitivityModel, MethodologyInputs, build_sensitivity_cases, load_sensitivity_matrix
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _yearly_peaks():
@@ -162,7 +165,7 @@ def test_cbtca_sensitivity_model_normalizes_weights():
 
 def test_build_sensitivity_cases_covers_multiple_specified_families():
     inputs = _seasonal_inputs()
-    matrix = load_sensitivity_matrix("/home/garrett/.openclaw/workspace/projects/ercot-transmission-cost-allocation-study/src/config/sensitivity_matrix.yaml")
+    matrix = load_sensitivity_matrix(os.path.join(PROJECT_ROOT, "src/config/sensitivity_matrix.yaml"))
     results = build_sensitivity_cases(inputs, matrix=matrix)
     families = {result.assumptions["sensitivity_family"] for result in results}
     assert {"operational_planning_weights", "congestion_proxy_tiers", "export_rules", "planning_windows", "target_set_sizes", "outlier_caps"}.issubset(families)
