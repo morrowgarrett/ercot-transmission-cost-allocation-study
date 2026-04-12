@@ -8,76 +8,11 @@ from src.comparison.metrics import (
     revenue_sufficiency_check,
 )
 from src.comparison.scorecard import build_comparison_bundle, build_scorecard, run_methodology_suite
-from src.models.base import MethodologyInputs
-
-
-def _summer_peaks():
-    return {
-        "2024-06": "2024-06-15T17:00:00Z",
-        "2024-07": "2024-07-15T17:00:00Z",
-        "2024-08": "2024-08-15T17:00:00Z",
-        "2024-09": "2024-09-15T17:00:00Z",
-    }
-
-
-def _yearly_peaks():
-    return {f"2024-{m:02d}": f"2024-{m:02d}-15T17:00:00Z" for m in range(1, 13)}
+from src.comparison.synthetic_data import build_four_zone_synthetic_inputs, synthetic_dataset_metadata
 
 
 def _comparison_inputs():
-    zonal_load = []
-    net_zonal_load = []
-    zonal_lmp_series = []
-    system_lambda_series = []
-    congestion_series = []
-    shadow_price_series = []
-
-    for m in range(1, 13):
-        ts = f"2024-{m:02d}-15T17:00:00Z"
-        zonal_load.extend(
-            [
-                {"timestamp": ts, "zone": "NORTH", "load_mw": 100.0 + m},
-                {"timestamp": ts, "zone": "SOUTH", "load_mw": 90.0 + (13 - m)},
-            ]
-        )
-        net_zonal_load.extend(
-            [
-                {"timestamp": ts, "zone": "NORTH", "load_mw": 80.0 + m},
-                {"timestamp": ts, "zone": "SOUTH", "load_mw": 85.0 + (13 - m)},
-            ]
-        )
-        zonal_lmp_series.extend(
-            [
-                {"timestamp": ts, "zone": "NORTH", "lmp": 36.0, "energy_component": 20.0, "loss_component": 4.0},
-                {"timestamp": ts, "zone": "SOUTH", "lmp": 28.0, "energy_component": 20.0, "loss_component": 3.0},
-            ]
-        )
-        system_lambda_series.append({"timestamp": ts, "system_lambda": 20.0})
-        congestion_series.extend(
-            [
-                {"timestamp": ts, "zone": "NORTH", "congestion_component": 12.0},
-                {"timestamp": ts, "zone": "SOUTH", "congestion_component": 5.0},
-            ]
-        )
-        shadow_price_series.extend(
-            [
-                {"timestamp": ts, "constraint": "WEST_PATH", "shadow_price": 20.0, "binding_flag": 1},
-                {"timestamp": ts, "constraint": "COAST_PATH", "shadow_price": 10.0, "binding_flag": 1},
-            ]
-        )
-
-    return MethodologyInputs(
-        year=2024,
-        tcos_target_usd=1000.0,
-        peak_intervals=_yearly_peaks(),
-        zonal_load=zonal_load,
-        net_zonal_load=net_zonal_load,
-        zonal_lmp_series=zonal_lmp_series,
-        system_lambda_series=system_lambda_series,
-        congestion_series=congestion_series,
-        shadow_price_series=shadow_price_series,
-        metadata={"export_rule": "A"},
-    )
+    return build_four_zone_synthetic_inputs()
 
 
 def test_run_methodology_suite_returns_all_core_models():
@@ -103,6 +38,7 @@ def test_metric_tables_have_expected_columns():
     assert {"methodology", "zone", "share_shift", "allocation_shift_usd"}.issubset(shifts.columns)
     assert revenue["within_tolerance"].all()
     assert {"methodology", "hhi", "max_zone_share"}.issubset(concentration.columns)
+    assert set(shares["zone"]) == {"NORTH", "SOUTH", "WEST", "HOUSTON"}
 
 
 def test_scorecard_and_bundle_include_sensitivity_family_row():
@@ -145,3 +81,19 @@ def test_scorecard_retains_baseline_rows():
     baseline = scorecard[scorecard["methodology"] == "4cp"]
     assert len(baseline) == 1
     assert bool(baseline.iloc[0]["within_tolerance"]) is True
+
+
+def test_synthetic_fixture_includes_high_btm_and_export_heavy_zone_behavior():
+    inputs = _comparison_inputs()
+    west_net = [row["load_mw"] for row in inputs.net_zonal_load if row["zone"] == "WEST"]
+    houston_gross = [row["load_mw"] for row in inputs.zonal_load if row["zone"] == "HOUSTON"]
+    assert min(west_net) < 0.0
+    assert max(houston_gross) > max(row["load_mw"] for row in inputs.zonal_load if row["zone"] == "WEST")
+
+
+def test_synthetic_fixture_metadata_documents_synthetic_vs_real_boundaries():
+    metadata = synthetic_dataset_metadata()
+    assert metadata.name == "four_zone_v1"
+    assert "net_zonal_load" in metadata.synthetic_fields
+    assert "shadow_price_series" in metadata.real_data_mapping
+    assert any("export-heavy" in note or "high-BTM" in note for note in metadata.edge_cases)
