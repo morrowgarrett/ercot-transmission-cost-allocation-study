@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools==78.1.1", "wheel>=0.45,<0.46"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -11,11 +11,14 @@ requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [{name = "Garrett Morrow"}]
 dependencies = [
-  "pydantic>=2.0",
-  "pyyaml>=6.0",
-  "pandas>=2.0",
-  "pytest>=8.0"
+  "pydantic==2.12.5",
+  "PyYAML==6.0.2",
+  "pandas==3.0.1",
+  "pytest==9.0.2"
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools]
+packages = ["src"]

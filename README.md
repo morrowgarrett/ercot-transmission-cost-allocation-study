@@ -151,6 +151,11 @@ After installation:
 python3 -m pytest -v
 ```
 
+Or use the one-command reproduction target:
+```bash
+make reproduce
+```
+
 The current public suite covers:
 - baseline methodology correctness
 - CBTCA methodology fidelity and sensitivity behavior
